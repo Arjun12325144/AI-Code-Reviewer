@@ -34,7 +34,7 @@ client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
-MODEL = "openrouter/auto"
+MODEL = "openrouter/free"
 
 REVIEW_SYSTEM_PROMPT = """
 You are an expert code reviewer.
@@ -93,13 +93,28 @@ async def stream_review(code: str, language: str) -> AsyncGenerator[str, None]:
             model=MODEL,
             messages=[
                 {
+                    "role": "system",
+                    "content": REVIEW_SYSTEM_PROMPT + """
+                        Additional requirements:
+                        - Return only the final JSON object.
+                        - Never include internal reasoning, analysis, or Markdown.
+                        - Include all six required keys: bugs, style, security,
+                        summary, score, and language.
+                        - Use empty arrays when no issues are found.
+                        - Ensure the JSON is complete and valid.
+                        """
+                },
+                {
                     "role": "user",
-                    "content": f"{REVIEW_SYSTEM_PROMPT}\n\n{user_message}"
+                    "content": (
+                        f"Language: {language}\n\n"
+                        f"Code to review:\n{code}"
+                    )
                 }
             ],
             stream=True,
             max_tokens=2000,
-            temperature=0.3,
+            temperature=0.2,
             extra_headers={
                 "HTTP-Referer": "http://localhost:5173",
                 "X-Title": "AI Code Review Bot",
@@ -143,41 +158,44 @@ async def review_code(request: ReviewRequest):
 async def health():
     return {"status": "ok", "service": "ai-code-review"}
 
+
 @app.post("/fix")
 async def fix_issue(request: dict):
     code = request.get("code", "")
     issue = request.get("issue", "")
     language = request.get("language", "auto")
 
-    if not code or not issue:
-        raise HTTPException(status_code=400, detail="Code and issue required")
+    if not code.strip() or not issue.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Code and issue required"
+        )
 
     try:
         response = await client.chat.completions.create(
             model=MODEL,
             messages=[
                 {
+                    "role": "system",
+                    "content": (
+                        "You are an expert software engineer. "
+                        "Fix the specified issue with minimal changes. "
+                        "Return only a valid JSON object with exactly "
+                        "two keys: fixed_code and explanation. "
+                        "Both values must be strings. Do not use "
+                        "Markdown code fences."
+                    )
+                },
+                {
                     "role": "user",
-                    "content": f"""
-You are an expert software engineer.
-
-Fix the issue described in the code below.
-
-Return JSON ONLY in this format:
-{{"fixed_code":"...", "explanation":"..."}}
-
-Language: {language}
-
-Issue:
-{issue}
-
-Code:
-{code}
-"""
+                    "content": (
+                        f"Language: {language}\n\n"
+                        f"Issue:\n{issue}\n\n"
+                        f"Code:\n{code}"
+                    )
                 }
             ],
-             response_format={"type": "json_object"},
-            max_tokens=1000,
+            max_tokens=2000,
             temperature=0.2,
             extra_headers={
                 "HTTP-Referer": "http://localhost:5173",
@@ -185,15 +203,112 @@ Code:
             }
         )
 
-        content = response.choices[0].message.content.strip()
+        message = response.choices[0].message
+        content = (message.content or "").strip()
 
+        # Log diagnostic information if the model returns no text.
+        if not content:
+            logger.error(
+                "Empty AI response. Model=%s, finish_reason=%s",
+                MODEL,
+                response.choices[0].finish_reason
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="AI model returned an empty response. Try again."
+            )
+
+        # Remove Markdown fences if the model adds them.
         if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
+            content = content.replace("```json", "", 1)
+            content = content.replace("```", "").strip()
 
-        return json.loads(content)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON returned by AI: %s", content)
+            raise HTTPException(
+                status_code=502,
+                detail="AI returned invalid JSON. Please try again."
+            )
 
-    except Exception as e:
-        logger.error(f"Fix endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        if not isinstance(result, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="AI returned an unexpected response format."
+            )
+
+        if not isinstance(result.get("fixed_code"), str) or not isinstance(
+            result.get("explanation"), str
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="AI response is missing fixed_code or explanation."
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Fix endpoint failed")
+        raise HTTPException(
+            status_code=502,
+            detail="AI service request failed. Check the backend logs."
+        )
+
+
+# @app.post("/fix")
+# async def fix_issue(request: dict):
+#     code = request.get("code", "")
+#     issue = request.get("issue", "")
+#     language = request.get("language", "auto")
+
+#     if not code or not issue:
+#         raise HTTPException(status_code=400, detail="Code and issue required")
+
+#     try:
+#         response = await client.chat.completions.create(
+#             model=MODEL,
+#             messages=[
+#                 {
+#                     "role": "user",
+#                     "content": f"""
+# You are an expert software engineer.
+
+# Fix the issue described in the code below.
+
+# Return JSON ONLY in this format:
+# {{"fixed_code":"...", "explanation":"..."}}
+
+# Language: {language}
+
+# Issue:
+# {issue}
+
+# Code:
+# {code}
+# """
+#                 }
+#             ],
+#              response_format={"type": "json_object"},
+#             max_tokens=1000,
+#             temperature=0.2,
+#             extra_headers={
+#                 "HTTP-Referer": "http://localhost:5173",
+#                 "X-Title": "AI Code Review Bot",
+#             }
+#         )
+
+#         content = response.choices[0].message.content.strip()
+
+#         if content.startswith("```"):
+#             content = content.replace("```json", "").replace("```", "").strip()
+
+#         return json.loads(content)
+
+#     except Exception as e:
+#         logger.error(f"Fix endpoint error: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
 
  
