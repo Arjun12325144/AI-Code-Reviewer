@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from openai import AsyncOpenAI
 from typing import AsyncGenerator
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 import logging
 
 load_dotenv()
@@ -15,9 +17,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-if not OPENROUTER_API_KEY:
-    raise RuntimeError("OPENROUTER_API_KEY is not set in .env file")
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+# if not OPENROUTER_API_KEY:
+#     raise RuntimeError("OPENROUTER_API_KEY is not set in .env file")
 
 app = FastAPI(title="AI Code Review Service", version="1.0.0")
 
@@ -45,7 +47,7 @@ if not GEMINI_API_KEY:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL = "gemini-3.8-flash"
+MODEL = "gemini-2.5-flash"
 
 REVIEW_SYSTEM_PROMPT = """
 You are an expert code reviewer.
@@ -145,7 +147,44 @@ class ReviewRequest(BaseModel):
     #     logger.error(f"Streaming error: {e}")
     #     error_data = json.dumps({"error": str(e), "done": True})
     #     yield f"data: {error_data}\n\n"
-async def stream_review(code, language):
+# async def stream_review(code, language):
+#     try:
+#         stream = await client.aio.models.generate_content_stream(
+#             model=MODEL,
+#             contents=(
+#                 f"Review this {language} code:\n\n"
+#                 f"```{language}\n{code}\n```"
+#             ),
+#             config=types.GenerateContentConfig(
+#                 system_instruction=REVIEW_SYSTEM_PROMPT,
+#                 temperature=0.2,
+#                 max_output_tokens=2000,
+#                 response_mime_type="application/json",
+#             ),
+#         )
+
+#         async for chunk in stream:
+#             if chunk.text:
+#                 data = json.dumps({
+#                     "chunk": chunk.text,
+#                     "done": False
+#                 })
+#                 yield f"data: {data}\n\n"
+
+#         yield f"data: {json.dumps({
+#             'chunk': '',
+#             'done': True
+#         })}\n\n"
+
+#     except Exception:
+#         logger.exception("Gemini review streaming failed")
+#         data = json.dumps({
+#             "error": "AI review failed. Please try again later.",
+#             "done": True
+#         })
+#         yield f"data: {data}\n\n"
+
+async def stream_review(code: str, language: str) -> AsyncGenerator[str, None]:
     try:
         stream = await client.aio.models.generate_content_stream(
             model=MODEL,
@@ -165,20 +204,22 @@ async def stream_review(code, language):
             if chunk.text:
                 data = json.dumps({
                     "chunk": chunk.text,
-                    "done": False
+                    "done": False,
                 })
                 yield f"data: {data}\n\n"
 
-        yield f"data: {json.dumps({
-            'chunk': '',
-            'done': True
-        })}\n\n"
+        data = json.dumps({
+            "chunk": "",
+            "done": True,
+        })
+        yield f"data: {data}\n\n"
 
     except Exception:
         logger.exception("Gemini review streaming failed")
+
         data = json.dumps({
             "error": "AI review failed. Please try again later.",
-            "done": True
+            "done": True,
         })
         yield f"data: {data}\n\n"
 
