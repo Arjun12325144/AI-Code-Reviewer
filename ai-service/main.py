@@ -562,21 +562,36 @@ async def stream_review(code: str, language: str) -> AsyncGenerator[str, None]:
 
             yield f"data: {json.dumps({'chunk': '', 'done': True})}\n\n"
             return
-
         except errors.APIError as e:
             logger.warning(f"Review APIError on {model_name} ({e.code}): {e.message}")
-            if e.code == 429 and index < len(models_to_try) - 1:
-                logger.info(f"Falling back to {FALLBACK_MODEL}...")
+            # Trigger fallback on 429 (Rate Limit) or 503/500/504 (Server Overload)
+            if e.code in (429, 500, 503, 504) and index < len(models_to_try) - 1:
+                logger.info(f"Model {model_name} unavailable ({e.code}). Falling back to {FALLBACK_MODEL}...")
                 await asyncio.sleep(1.5)
                 continue
 
             error_msg = (
-                "Rate limit exceeded (429) on both primary and fallback models. Please wait a minute and retry."
-                if e.code == 429
+                "Gemini servers are currently overloaded or rate-limited. Please try again in a moment."
+                if e.code in (429, 503)
                 else f"AI review failed ({e.code}): {e.message}"
             )
             yield f"data: {json.dumps({'error': error_msg, 'done': True})}\n\n"
             return
+
+        # except errors.APIError as e:
+        #     logger.warning(f"Review APIError on {model_name} ({e.code}): {e.message}")
+        #     if e.code == 429 and index < len(models_to_try) - 1:
+        #         logger.info(f"Falling back to {FALLBACK_MODEL}...")
+        #         await asyncio.sleep(1.5)
+        #         continue
+
+        #     error_msg = (
+        #         "Rate limit exceeded (429) on both primary and fallback models. Please wait a minute and retry."
+        #         if e.code == 429
+        #         else f"AI review failed ({e.code}): {e.message}"
+        #     )
+        #     yield f"data: {json.dumps({'error': error_msg, 'done': True})}\n\n"
+        #     return
 
         except Exception as e:
             logger.exception("Unexpected error during Gemini review streaming")
@@ -635,13 +650,22 @@ async def fix_issue(request: FixRequest):
                 "model_used": model_name,
             }
 
+        # except errors.APIError as e:
+        #     last_error = e
+        #     logger.warning(f"Fix APIError on {model_name} ({e.code}): {e.message}")
+        #     if e.code == 429 and index < len(models_to_try) - 1:
+        #         await asyncio.sleep(1.5)
+        #         continue
+        #     break
         except errors.APIError as e:
             last_error = e
             logger.warning(f"Fix APIError on {model_name} ({e.code}): {e.message}")
-            if e.code == 429 and index < len(models_to_try) - 1:
+            if e.code in (429, 500, 503, 504) and index < len(models_to_try) - 1:
+                logger.info(f"Model {model_name} unavailable ({e.code}). Falling back...")
                 await asyncio.sleep(1.5)
                 continue
             break
+
 
         except json.JSONDecodeError:
             logger.exception(f"Invalid JSON returned by {model_name}")
